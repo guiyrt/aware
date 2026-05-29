@@ -1,0 +1,19 @@
+sources:
+  my_app_logs:
+    type: docker_logs
+    include_containers:
+      - gaze-capture
+      - instance-pred
+      - task-prediction
+      - screen-recorder
+
+sinks:
+  file_output:
+    type: file
+    inputs: [my_app_logs]
+    path: "/var/log/containers/{{ container_name }}.log"
+    encoding:
+      codec: text
+    buffer:
+      type: memory
+      max_events: 1000

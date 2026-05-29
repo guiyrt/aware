@@ -1,0 +1,12 @@
+[submodule "task_prediction"]
+	path = task_prediction
+	url = git@github.com:guiyrt/task_prediction.git
+[submodule "instance_pred"]
+	path = instance_pred
+	url = git@github.com:guiyrt/instance_pred.git
+[submodule "gaze_capture"]
+	path = gaze_capture
+	url = git@github.com:guiyrt/gaze_capture.git
+[submodule "screen_recording"]
+	path = screen_recording
+	url = git@github.com:guiyrt/screen_recording.git

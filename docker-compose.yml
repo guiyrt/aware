@@ -1,0 +1,207 @@
+services:
+  log-collector:
+    image: timberio/vector:latest-alpine
+    container_name: log_collector
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - type: bind
+        source: ./vector.yaml
+        target: /etc/vector/vector.yaml
+        read_only: true
+      - ./logs:/var/log/containers:rw
+
+  nats:
+    image: nats:latest
+    container_name: nats-main
+    restart: always
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - ./nats.conf:/nats.conf:ro
+    command: ["-c", "/nats.conf"]
+
+  gaze-capture:
+    image: gaze-capture:latest
+    container_name: gaze-capture
+    network_mode: host
+
+    # Logging
+    logging: &default-logging
+      driver: "json-file"
+      options:
+        max-size: "50m" # Safety net for local docker storage
+        max-file: "2"
+
+    # --- Eye Tracker Access ---
+    device_cgroup_rules:
+      - 'c 189:* rmw'
+
+    # --- Volumes ---
+    volumes:
+      # For communicating with the X server
+      - /tmp/.X11-unix:/tmp/.X11-unix
+
+      # SSH
+      - ~/.ssh:/home/appuser/.ssh:ro
+
+      # USB
+      - /dev/bus/usb:/dev/bus/usb
+      - /run/udev:/run/udev:ro
+      
+      # --- Data Persistence ---
+      - ${RUNS_DATA_PATH}:/app/data/
+
+    # --- GUI Forwarding Configuration ---
+    environment:
+    # Pass host UID/GID to the entrypoint
+      - PUID
+      - PGID
+      - DISPLAY
+
+      - GAZE__ORION_HOST=${ORION_HOST}
+      - GAZE__ORION_POLARIS_DB_DIR=${ORION_SRC_PATH}
+
+      - GAZE__DATA_DIR=/app/data
+      - GAZE__NATS_HOST=${NATS_HOST}
+      - GAZE__LOGGING__LEVEL=${LOG_LEVEL}
+      - GAZE__USE_DUMMY_MODE=true
+
+      # Screen dimensions
+      - GAZE__DISPLAY_AREA__HEIGHT_PX=2160 
+      - GAZE__DISPLAY_AREA__WIDTH_PX=3840 
+      - GAZE__DISPLAY_AREA__WIDTH_MM=937.20
+      - GAZE__DISPLAY_AREA__HEIGHT_MM=527.17   
+      - GAZE__DISPLAY_AREA__VERTICAL_OFFSET_MM=0
+      - GAZE__DISPLAY_AREA__HORIZONTAL_OFFSET_MM=0
+      - GAZE__DISPLAY_AREA__DEPTH_OFFSET_MM=0
+  
+  instance-pred:
+    image: instance-pred:latest
+    container_name: instance-pred
+    network_mode: host
+    user: 1000:1000
+    logging: *default-logging
+
+    volumes:
+      - ${RUNS_DATA_PATH}:/app/data/
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  
+    environment:
+      - INTENT__DATA_DIR=/app/data
+      - INTENT__NATS_HOST=${NATS_HOST}
+      - INTENT__SAMPLING_INTERVAL_MS=500
+
+      # Parquet Sink Configuration
+      - INTENT__PARQUET__ENABLED=true
+      - INTENT__PARQUET__MAX_TIME_FLUSH_SEC=30
+
+      - INTENT__NATS__ENABLED=true
+      - INTENT__NATS__NATS__SUBJECT=intent.aircraft_attention_target
+
+      # 
+      - INTENT__TERMINAL__ENABLED=false
+      
+      # Logging
+      - INTENT__LOGGING__LEVEL=${LOG_LEVEL}
+
+  task-pred:
+    image: task-pred:latest
+    container_name: task-prediction
+    user: 1000:1000
+    network_mode: host
+    logging: *default-logging
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    volumes:
+      - ${RUNS_DATA_PATH}:/app/data/
+    
+    environment:
+      - TASK_PRED__DATA_DIR=/app/data
+      - TASK_PRED__NATS_HOST=${NATS_HOST}
+      - TASK_PRED__SAMPLING_INTERVAL_MS=2000
+
+      # Model
+      - TASK_PRED__MODEL__MODEL_DIR=/app/model
+      - TASK_PRED__MODEL__FORCE_STAGE_B=true
+      - TASK_PRED__MODEL__VALIDATE_INPUT=true
+      - TASK_PRED__MODEL__MULTIPLY_BY_ACTIVE_PROBA=false
+      
+      # Parquet sink
+      - TASK_PRED__PARQUET__ENABLED=true
+      - TASK_PRED__PARQUET__QUEUE_SIZE=50
+      - TASK_PRED__PARQUET__MAX_BUFFER_SIZE=5
+
+      # Terminal sink
+      - TASK_PRED__TERMINAL__ENABLED=true
+
+      # NATS sink (protobuf messages)
+      - TASK_PRED__NATS__ENABLED=true
+      - TASK_PRED__NATS__SUBJECT=intent.task_prediction
+      
+      # Logging
+      - TASK_PRED__LOGGING__LEVEL=${LOG_LEVEL}
+    
+      # Fix Matplotlib warning by pointing to a writable location
+      - MPLCONFIGDIR=/tmp/matplotlib
+
+  screen-recorder:
+    image: screen-recorder:latest
+    container_name: screen-recorder
+    network_mode: host
+    ipc: host
+    logging: *default-logging
+
+    device_cgroup_rules:
+      - 'c 116:* rmw'
+    
+    # Force the container to run as standard user
+    user: "${PUID}:${PGID}"
+
+    # Retain supplementary group access to hardware mapped into the container
+    group_add:
+      - audio
+      - video
+
+    volumes:
+      # Required to capture the X11 screen
+      - /tmp/.X11-unix:/tmp/.X11-unix:ro
+
+      # --- PULSE AUDIO MAPPING ---
+      # Mount the PulseAudio socket for the user 1000
+      - /run/user/1000/pulse/native:/run/user/1000/pulse/native
+      # Mount the authentication cookie so the container can talk to the host's sound server
+      - ~/.config/pulse/cookie:/tmp/pulse-cookie:ro
+
+      # Data persistence
+      - ${RUNS_DATA_PATH}:/app/data/
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
+              driver: nvidia
+              
+    environment:
+      - SCREEN__DATA_DIR=/app/data
+      - SCREEN__NATS_HOST=${NATS_HOST}
+      - SCREEN__HEALTH_SUBJECT=screen.health
+      - SCREEN__CMDS_SUBJECT=screen.cmds
+      - SCREEN__MODE=gpu
+
+      - SCREEN__AUDIO__MICROPHONE__ENABLED=false
+      - SCREEN__AUDIO__MICROPHONE__DEVICE=alsa_input.usb-Plantronics_Plantronics_Blackwire_3210_Series_1B04296BF7CDB648959159348B2CABC2-00.analog-stereo
+      - SCREEN__AUDIO__SYSTEM__ENABLED=false
+      - SCREEN__AUDIO__SYSTEM__DEVICE=alsa_output.usb-Plantronics_Plantronics_Blackwire_3210_Series_1B04296BF7CDB648959159348B2CABC2-00.mono-fallback.monitor
+      
+      - SCREEN__SCREEN__ENABLED=true
+      - SCREEN__SCREEN__DISPLAY=${DISPLAY}
+      - SCREEN__SCREEN__FPS=30
+      - SCREEN__SCREEN__VIDEO_BITRATE=15M
+      - SCREEN__SCREEN__MAX_BITRATE=35M
